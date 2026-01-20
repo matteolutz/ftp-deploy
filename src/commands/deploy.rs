@@ -213,7 +213,7 @@ impl DeployCommand {
 
             let file_name: &str = file_name.try_into().unwrap();
 
-            pb.set_message(file.display().to_string());
+            pb.set_message(file_name.to_string());
 
             ftp_stream.cwd_or_create_recursive(ftp_path.parent())?;
 
@@ -295,7 +295,10 @@ impl SubcommandDelegate for DeployCommand {
         let files_tracking = FilesTracking {
             files: files
                 .into_iter()
-                .map(|(path, (hash, _))| (path, hash))
+                .filter_map(|(path, (hash, mode))| match mode {
+                    FileMode::Deleted => None,
+                    _ => Some((path, hash)),
+                })
                 .collect(),
         };
 
