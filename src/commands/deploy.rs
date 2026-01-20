@@ -77,6 +77,15 @@ enum FileUpdateType {
     Deleted,
 }
 
+impl FileUpdateType {
+    pub fn get_verb(&self) -> &str {
+        match self {
+            FileUpdateType::CreateOrUpdate => "create or update",
+            FileUpdateType::Deleted => "delete",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct FileUpdate {
     file: PathBuf,
@@ -210,18 +219,27 @@ impl DeployCommand {
 
             // TODO: update current path
 
-            match update_type {
+            let res = match update_type {
                 FileUpdateType::Deleted => {
                     if file.is_file() {
-                        ftp_stream.rm(file_name)?;
+                        ftp_stream.rm(file_name)
                     } else {
-                        ftp_stream.rmdir(file_name)?;
+                        ftp_stream.rmdir(file_name)
                     }
                 }
                 FileUpdateType::CreateOrUpdate => {
                     let mut reader = File::open(&file)?;
-                    ftp_stream.put(file_name, &mut reader)?;
+                    ftp_stream.put(file_name, &mut reader)
                 }
+            };
+
+            if let Err(err) = res {
+                println!(
+                    "[ftp-deploy] Failed to {} file '{}': {}",
+                    update_type.get_verb(),
+                    file.display(),
+                    err
+                );
             }
 
             pb.inc(1);
