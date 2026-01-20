@@ -105,6 +105,10 @@ pub struct DeployCommand {
     /// Dry run, do not actually deploy
     #[arg(short, long)]
     dry: bool,
+
+    /// Debug mode, print additional information
+    #[arg(short, long)]
+    debug: bool,
 }
 
 impl DeployCommand {
@@ -249,6 +253,11 @@ impl SubcommandDelegate for DeployCommand {
             updated_files.len(),
             deleted_files.len()
         );
+
+        if self.debug {
+            println!("Updated files: {:?}", updated_files);
+            println!("Deleted files: {:?}", deleted_files);
+        }
 
         let updates = FileUpdate::from_updated_and_deleted(updated_files, deleted_files);
 
