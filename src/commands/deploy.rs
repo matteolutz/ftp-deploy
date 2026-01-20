@@ -135,7 +135,9 @@ impl DeployCommand {
         .progress_chars("#>-");
         let pb = ProgressBar::new(updated_files.len() as u64).with_style(style);
 
-        for file in updated_files.iter() {
+        for file in updated_files.into_iter() {
+            // TODO: sort file paths and only do necessary mkdir's and cwd's
+
             let Some(file_name) = file.file_name() else {
                 println!("[ftp-deploy] Skipping invalid file {}", file.display());
                 continue;
