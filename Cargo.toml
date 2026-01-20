@@ -7,6 +7,7 @@ edition = "2024"
 clap = { version = "4.5.54", features = ["derive"] }
 ftp = "3.0.1"
 ignore = "0.4.25"
+indicatif = "0.18.3"
 itertools = "0.14.0"
 num_cpus = "1.17.0"
 serde = "1.0.228"

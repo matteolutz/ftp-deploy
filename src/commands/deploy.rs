@@ -9,6 +9,7 @@ use std::{
 
 use clap::Args;
 use ignore::WalkBuilder;
+use indicatif::{ProgressBar, ProgressStyle};
 use sha2::{Digest, Sha256};
 
 use crate::{
@@ -30,9 +31,9 @@ impl FileWalk {
         self.updated_files.lock().unwrap().push(path);
     }
 
-    fn update(&self, path: impl AsRef<Path>, hash: String) {
+    fn update(&self, path: impl AsRef<Path>, hash: String, force: bool) {
         if self.files.read().unwrap().contains_key(path.as_ref()) {
-            if self.files.read().unwrap().get(path.as_ref()).unwrap() != &hash {
+            if force || self.files.read().unwrap().get(path.as_ref()).unwrap() != &hash {
                 self.insert_update(path.as_ref().to_path_buf(), hash);
             }
         } else {
@@ -59,6 +60,10 @@ pub struct DeployCommand {
     /// Number of threads to use for walking files
     #[arg(short, long)]
     jobs: Option<usize>,
+
+    /// Force deploy even if no changes are detected
+    #[arg(short, long)]
+    force: bool,
 }
 
 impl DeployCommand {
@@ -80,6 +85,7 @@ impl DeployCommand {
 
         walker.run(|| {
             let file_walk = file_walk.clone();
+            let force = self.force;
 
             Box::new(move |result| {
                 let Ok(result) = result else {
@@ -92,7 +98,7 @@ impl DeployCommand {
                     let mut file = fs::File::open(path).unwrap();
                     io::copy(&mut file, &mut hasher).unwrap();
 
-                    file_walk.update(path, format!("{:x}", hasher.finalize()));
+                    file_walk.update(path, format!("{:x}", hasher.finalize()), force);
                 }
 
                 ignore::WalkState::Continue
@@ -122,7 +128,14 @@ impl DeployCommand {
 
         let mut ftp_stream = creds.open_stream()?;
 
-        for file in updated_files {
+        let style = ProgressStyle::with_template(
+            "{spinner:.green} [{elapsed_precise}] {msg} [{wide_bar:.cyan/blue}] ({eta})",
+        )
+        .unwrap()
+        .progress_chars("#>-");
+        let pb = ProgressBar::new(updated_files.len() as u64).with_style(style);
+
+        for file in updated_files.iter() {
             let Some(file_name) = file.file_name() else {
                 println!("[ftp-deploy] Skipping invalid file {}", file.display());
                 continue;
@@ -131,16 +144,14 @@ impl DeployCommand {
             let ftp_path = creds.ftp_path(&file);
             let file_name: &str = file_name.try_into().unwrap();
 
-            println!(
-                "[ftp-deploy] Uploading {} to {}",
-                file.display(),
-                ftp_path.display()
-            );
+            pb.set_message(file.display().to_string());
 
             ftp_stream.cwd_or_create_recursive(ftp_path.parent())?;
 
             let mut reader = File::open(&file)?;
             ftp_stream.put(file_name, &mut reader)?;
+
+            pb.inc(1);
         }
 
         Ok(())
