@@ -245,7 +245,7 @@ impl SubcommandDelegate for DeployCommand {
 
         let deleted_files = files_before
             .into_iter()
-            .filter(|path| files.contains_key(path.as_path()))
+            .filter(|path| !files.contains_key(path.as_path()))
             .collect::<Vec<_>>();
 
         println!(
