@@ -4,9 +4,15 @@ use serde_derive::{Deserialize, Serialize};
 
 use crate::tracking::TrackingFile;
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FileState {
+    File(String),
+    Directory,
+}
+
 #[derive(Default, Serialize, Deserialize)]
 pub struct FilesTracking {
-    pub(crate) files: HashMap<PathBuf, String>,
+    pub(crate) files: HashMap<PathBuf, FileState>,
 }
 
 impl TrackingFile for FilesTracking {

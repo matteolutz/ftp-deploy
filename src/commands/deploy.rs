@@ -17,7 +17,7 @@ use crate::{
     commands::SubcommandDelegate,
     config::{ConfigLoader, FtpConfig, FtpCreds},
     ftp::FtpStreamExt,
-    tracking::{FilesTracking, IGNORE_FILE_NAME, TrackingFileLoder},
+    tracking::{FileState, FilesTracking, IGNORE_FILE_NAME, TrackingFileLoder},
 };
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
@@ -30,29 +30,29 @@ enum FileMode {
 
 #[derive(Clone)]
 struct FileWalk {
-    files: Arc<RwLock<HashMap<PathBuf, (String, FileMode)>>>,
+    files: Arc<RwLock<HashMap<PathBuf, (FileState, FileMode)>>>,
 }
 
 impl FileWalk {
-    fn insert_update(&self, path: PathBuf, hash: String, mode: FileMode) {
+    fn insert_update(&self, path: PathBuf, state: FileState, mode: FileMode) {
         self.files
             .write()
             .unwrap()
-            .insert(path.clone(), (hash, mode));
+            .insert(path.clone(), (state, mode));
     }
 
-    fn update(&self, path: impl AsRef<Path>, hash: String, force: bool) {
+    fn update(&self, path: impl AsRef<Path>, state: FileState, force: bool) {
         if self.files.read().unwrap().contains_key(path.as_ref()) {
-            let mode = if force || self.files.read().unwrap().get(path.as_ref()).unwrap().0 != hash
+            let mode = if force || self.files.read().unwrap().get(path.as_ref()).unwrap().0 != state
             {
                 FileMode::Updated
             } else {
                 FileMode::Untouched
             };
 
-            self.insert_update(path.as_ref().to_path_buf(), hash, mode);
+            self.insert_update(path.as_ref().to_path_buf(), state, mode);
         } else {
-            self.insert_update(path.as_ref().to_path_buf(), hash, FileMode::Created);
+            self.insert_update(path.as_ref().to_path_buf(), state, FileMode::Created);
         }
     }
 }
@@ -74,14 +74,29 @@ impl From<FilesTracking> for FileWalk {
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 enum FileUpdateType {
     CreateOrUpdate,
-    Deleted,
+    Delete,
 }
 
 impl FileUpdateType {
     pub fn get_verb(&self) -> &str {
         match self {
             FileUpdateType::CreateOrUpdate => "create or update",
-            FileUpdateType::Deleted => "delete",
+            FileUpdateType::Delete => "delete",
+        }
+    }
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+enum FileType {
+    File,
+    Directory,
+}
+
+impl From<&FileState> for FileType {
+    fn from(value: &FileState) -> Self {
+        match value {
+            FileState::File(_) => Self::File,
+            FileState::Directory => Self::Directory,
         }
     }
 }
@@ -89,22 +104,24 @@ impl FileUpdateType {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct FileUpdate {
     file: PathBuf,
+    file_type: FileType,
     update_type: FileUpdateType,
 }
 
 impl FileUpdate {
-    pub fn from_files(files: &HashMap<PathBuf, (String, FileMode)>) -> Vec<FileUpdate> {
+    pub fn from_files(files: &HashMap<PathBuf, (FileState, FileMode)>) -> Vec<FileUpdate> {
         files
             .iter()
-            .filter_map(|(path, (_, mode))| {
+            .filter_map(|(path, (state, mode))| {
                 let update_mode = match mode {
                     FileMode::Created | FileMode::Updated => FileUpdateType::CreateOrUpdate,
-                    FileMode::Deleted => FileUpdateType::Deleted,
+                    FileMode::Deleted => FileUpdateType::Delete,
                     _ => return None,
                 };
 
                 Some(FileUpdate {
                     file: path.clone(),
+                    file_type: state.into(),
                     update_type: update_mode,
                 })
             })
@@ -130,6 +147,10 @@ pub struct DeployCommand {
     #[arg(short, long)]
     dry: bool,
 
+    /// Do not upload files but update tracking information
+    #[arg(short, long)]
+    no_upload: bool,
+
     /// Debug mode, print additional information
     #[arg(short, long)]
     debug: bool,
@@ -140,7 +161,7 @@ impl DeployCommand {
         &self,
         base_path: &Path,
         files_tracking: FilesTracking,
-    ) -> Result<HashMap<PathBuf, (String, FileMode)>, Box<dyn std::error::Error>> {
+    ) -> Result<HashMap<PathBuf, (FileState, FileMode)>, Box<dyn std::error::Error>> {
         let jobs = self.jobs.unwrap_or_else(|| num_cpus::get());
         let file_walk: FileWalk = files_tracking.into();
 
@@ -163,13 +184,17 @@ impl DeployCommand {
                 };
 
                 let path = result.path();
-                if path.is_file() {
+                let state = if path.is_file() {
                     let mut hasher = Sha256::new();
                     let mut file = fs::File::open(path).unwrap();
                     io::copy(&mut file, &mut hasher).unwrap();
 
-                    file_walk.update(path, format!("{:x}", hasher.finalize()), force);
-                }
+                    FileState::File(format!("{:x}", hasher.finalize()))
+                } else {
+                    FileState::Directory
+                };
+
+                file_walk.update(path, state, force);
 
                 ignore::WalkState::Continue
             })
@@ -200,7 +225,12 @@ impl DeployCommand {
         .progress_chars("#>-");
         let pb = ProgressBar::new(updated_files.len() as u64).with_style(style);
 
-        for FileUpdate { file, update_type } in updated_files.into_iter() {
+        for FileUpdate {
+            file,
+            file_type,
+            update_type,
+        } in updated_files.into_iter()
+        {
             // TODO: sort file paths and only do necessary mkdir's and cwd's
 
             let Some(file_name) = file.file_name() else {
@@ -220,17 +250,17 @@ impl DeployCommand {
             // TODO: update current path
 
             let res = match update_type {
-                FileUpdateType::Deleted => {
-                    if file.is_file() {
-                        ftp_stream.rm(file_name)
-                    } else {
-                        ftp_stream.rmdir(file_name)
+                FileUpdateType::Delete => match file_type {
+                    FileType::File => ftp_stream.rm(file_name),
+                    FileType::Directory => ftp_stream.rmdir(file_name),
+                },
+                FileUpdateType::CreateOrUpdate => match file_type {
+                    FileType::Directory => ftp_stream.mkdir(file_name),
+                    FileType::File => {
+                        let mut reader = File::open(&file)?;
+                        ftp_stream.put(file_name, &mut reader)
                     }
-                }
-                FileUpdateType::CreateOrUpdate => {
-                    let mut reader = File::open(&file)?;
-                    ftp_stream.put(file_name, &mut reader)
-                }
+                },
             };
 
             if let Err(err) = res {
@@ -295,15 +325,15 @@ impl SubcommandDelegate for DeployCommand {
         let files_tracking = FilesTracking {
             files: files
                 .into_iter()
-                .filter_map(|(path, (hash, mode))| match mode {
+                .filter_map(|(path, (state, mode))| match mode {
                     FileMode::Deleted => None,
-                    _ => Some((path, hash)),
+                    _ => Some((path, state)),
                 })
                 .collect(),
         };
 
         if !self.dry {
-            if !updates.is_empty() {
+            if !self.no_upload && !updates.is_empty() {
                 self.upload_files(&creds, updates)?;
             } else {
                 println!("[ftp-deploy] No files to upload.")
