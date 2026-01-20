@@ -1,0 +1,15 @@
+[package]
+name = "ftp-deploy"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+clap = { version = "4.5.54", features = ["derive"] }
+ftp = "3.0.1"
+ignore = "0.4.25"
+itertools = "0.14.0"
+num_cpus = "1.17.0"
+serde = "1.0.228"
+serde_derive = "1.0.228"
+serde_json = "1.0.149"
+sha2 = "0.10.9"

@@ -1,0 +1,6 @@
+/target
+
+# Test files
+ftp-*.json
+.ftpignore
+.ftp/
