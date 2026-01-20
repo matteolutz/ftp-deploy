@@ -101,6 +101,10 @@ pub struct DeployCommand {
     /// Force deploy even if no changes are detected
     #[arg(short, long)]
     force: bool,
+
+    /// Dry run, do not actually deploy
+    #[arg(short, long)]
+    dry: bool,
 }
 
 impl DeployCommand {
@@ -248,14 +252,16 @@ impl SubcommandDelegate for DeployCommand {
 
         let updates = FileUpdate::from_updated_and_deleted(updated_files, deleted_files);
 
-        if !updates.is_empty() {
-            self.upload_files(&creds, updates)?;
-        } else {
-            println!("[ftp-deploy] No files to upload.")
-        }
+        if !self.dry {
+            if !updates.is_empty() {
+                self.upload_files(&creds, updates)?;
+            } else {
+                println!("[ftp-deploy] No files to upload.")
+            }
 
-        let files_tracking = FilesTracking { files };
-        files_tracking.write(&base_path)?;
+            let files_tracking = FilesTracking { files };
+            files_tracking.write(&base_path)?;
+        }
 
         Ok(())
     }
