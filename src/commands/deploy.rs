@@ -71,7 +71,7 @@ impl From<FilesTracking> for FileWalk {
     }
 }
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 enum FileUpdateType {
     CreateOrUpdate,
     Delete,
@@ -103,9 +103,39 @@ impl From<&FileState> for FileType {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct FileUpdate {
-    file: PathBuf,
-    file_type: FileType,
     update_type: FileUpdateType,
+    file_type: FileType,
+    file: PathBuf,
+}
+
+impl PartialOrd for FileUpdate {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        match (self.update_type, other.update_type) {
+            (FileUpdateType::Delete, FileUpdateType::Delete) => {
+                // sort so that first items with file_type File and then Directory and then by file name
+                match (self.file_type, other.file_type) {
+                    (FileType::File, FileType::Directory) => Some(std::cmp::Ordering::Less),
+                    (FileType::Directory, FileType::File) => Some(std::cmp::Ordering::Greater),
+                    _ => self.file.partial_cmp(&other.file),
+                }
+            }
+            (FileUpdateType::CreateOrUpdate, FileUpdateType::CreateOrUpdate) => {
+                // sort so that first items with file_type Directory and then File and then by file name
+                match (self.file_type, other.file_type) {
+                    (FileType::Directory, FileType::File) => Some(std::cmp::Ordering::Less),
+                    (FileType::File, FileType::Directory) => Some(std::cmp::Ordering::Greater),
+                    _ => self.file.partial_cmp(&other.file),
+                }
+            }
+            (a, b) => a.partial_cmp(&b),
+        }
+    }
+}
+
+impl Ord for FileUpdate {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.partial_cmp(other).unwrap()
+    }
 }
 
 impl FileUpdate {
@@ -229,7 +259,7 @@ impl DeployCommand {
             file,
             file_type,
             update_type,
-        } in updated_files.into_iter()
+        } in updated_files.into_iter().sorted()
         {
             // TODO: sort file paths and only do necessary mkdir's and cwd's
 
