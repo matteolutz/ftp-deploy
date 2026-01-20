@@ -3,13 +3,14 @@ use std::{
     fs::{self, File},
     io,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, RwLock},
+    sync::{Arc, RwLock},
     time,
 };
 
 use clap::Args;
 use ignore::WalkBuilder;
 use indicatif::{ProgressBar, ProgressStyle};
+use itertools::Itertools;
 use sha2::{Digest, Sha256};
 
 use crate::{
@@ -19,25 +20,39 @@ use crate::{
     tracking::{FilesTracking, IGNORE_FILE_NAME, TrackingFileLoder},
 };
 
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+enum FileMode {
+    Untouched,
+    Created,
+    Updated,
+    Deleted,
+}
+
 #[derive(Clone)]
 struct FileWalk {
-    files: Arc<RwLock<HashMap<PathBuf, String>>>,
-    updated_files: Arc<Mutex<Vec<PathBuf>>>,
+    files: Arc<RwLock<HashMap<PathBuf, (String, FileMode)>>>,
 }
 
 impl FileWalk {
-    fn insert_update(&self, path: PathBuf, hash: String) {
-        self.files.write().unwrap().insert(path.clone(), hash);
-        self.updated_files.lock().unwrap().push(path);
+    fn insert_update(&self, path: PathBuf, hash: String, mode: FileMode) {
+        self.files
+            .write()
+            .unwrap()
+            .insert(path.clone(), (hash, mode));
     }
 
     fn update(&self, path: impl AsRef<Path>, hash: String, force: bool) {
         if self.files.read().unwrap().contains_key(path.as_ref()) {
-            if force || self.files.read().unwrap().get(path.as_ref()).unwrap() != &hash {
-                self.insert_update(path.as_ref().to_path_buf(), hash);
-            }
+            let mode = if force || self.files.read().unwrap().get(path.as_ref()).unwrap().0 != hash
+            {
+                FileMode::Updated
+            } else {
+                FileMode::Untouched
+            };
+
+            self.insert_update(path.as_ref().to_path_buf(), hash, mode);
         } else {
-            self.insert_update(path.as_ref().to_path_buf(), hash);
+            self.insert_update(path.as_ref().to_path_buf(), hash, FileMode::Created);
         }
     }
 }
@@ -45,8 +60,13 @@ impl FileWalk {
 impl From<FilesTracking> for FileWalk {
     fn from(value: FilesTracking) -> Self {
         Self {
-            files: Arc::new(RwLock::new(value.files)),
-            updated_files: Arc::new(Mutex::new(vec![])),
+            files: Arc::new(RwLock::new(
+                value
+                    .files
+                    .into_iter()
+                    .map(|(key, value)| (key, (value, FileMode::Deleted)))
+                    .collect(),
+            )),
         }
     }
 }
@@ -64,27 +84,22 @@ struct FileUpdate {
 }
 
 impl FileUpdate {
-    pub fn from_updated_and_deleted(
-        updated_files: Vec<PathBuf>,
-        deleted_files: Vec<PathBuf>,
-    ) -> Vec<Self> {
-        let mut updates = Vec::with_capacity(updated_files.len() + deleted_files.len());
+    pub fn from_files(files: &HashMap<PathBuf, (String, FileMode)>) -> Vec<FileUpdate> {
+        files
+            .iter()
+            .filter_map(|(path, (_, mode))| {
+                let update_mode = match mode {
+                    FileMode::Created | FileMode::Updated => FileUpdateType::CreateOrUpdate,
+                    FileMode::Deleted => FileUpdateType::Deleted,
+                    _ => return None,
+                };
 
-        for file in updated_files {
-            updates.push(FileUpdate {
-                file,
-                update_type: FileUpdateType::CreateOrUpdate,
-            });
-        }
-
-        for file in deleted_files {
-            updates.push(FileUpdate {
-                file,
-                update_type: FileUpdateType::Deleted,
-            });
-        }
-
-        updates
+                Some(FileUpdate {
+                    file: path.clone(),
+                    update_type: update_mode,
+                })
+            })
+            .collect()
     }
 }
 
@@ -116,7 +131,7 @@ impl DeployCommand {
         &self,
         base_path: &Path,
         files_tracking: FilesTracking,
-    ) -> Result<(HashMap<PathBuf, String>, Vec<PathBuf>), Box<dyn std::error::Error>> {
+    ) -> Result<HashMap<PathBuf, (String, FileMode)>, Box<dyn std::error::Error>> {
         let jobs = self.jobs.unwrap_or_else(|| num_cpus::get());
         let file_walk: FileWalk = files_tracking.into();
 
@@ -152,13 +167,9 @@ impl DeployCommand {
         });
 
         let files = Arc::try_unwrap(file_walk.files).unwrap().into_inner()?;
-        let updated_files = Arc::try_unwrap(file_walk.updated_files)
-            .unwrap()
-            .into_inner()?;
-
         println!("[ftp-deploy] Collecting files took {:?}.", start.elapsed(),);
 
-        Ok((files, updated_files))
+        Ok(files)
     }
 
     fn upload_files(
@@ -233,33 +244,42 @@ impl SubcommandDelegate for DeployCommand {
         }
 
         let files_tracking = FilesTracking::load_or_create(&base_path)?;
-        let files_before = files_tracking
-            .files()
-            .keys()
-            .clone()
-            .into_iter()
-            .map(|path| path.clone())
-            .collect::<Vec<_>>();
 
-        let (files, updated_files) = self.collect_files(&base_path, files_tracking)?;
-
-        let deleted_files = files_before
-            .into_iter()
-            .filter(|path| !files.contains_key(path.as_path()))
-            .collect::<Vec<_>>();
+        let files = self.collect_files(&base_path, files_tracking)?;
 
         println!(
-            "[ftp-deploy] {} file(s) were updated, {} file(s) were deleted",
-            updated_files.len(),
-            deleted_files.len()
+            "[ftp-deploy] {} file(s) created, {} file(s) updated, {} file(s) were deleted",
+            files
+                .iter()
+                .filter(|(_, (_, mode))| *mode == FileMode::Created)
+                .count(),
+            files
+                .iter()
+                .filter(|(_, (_, mode))| *mode == FileMode::Updated)
+                .count(),
+            files
+                .iter()
+                .filter(|(_, (_, mode))| *mode == FileMode::Deleted)
+                .count(),
         );
 
         if self.debug {
-            println!("Updated files: {:?}", updated_files);
-            println!("Deleted files: {:?}", deleted_files);
+            println!(
+                "{}",
+                files
+                    .iter()
+                    .map(|(path, (_, mode))| format!("{}: {:?}", path.display(), mode))
+                    .join("\n")
+            );
         }
 
-        let updates = FileUpdate::from_updated_and_deleted(updated_files, deleted_files);
+        let updates = FileUpdate::from_files(&files);
+        let files_tracking = FilesTracking {
+            files: files
+                .into_iter()
+                .map(|(path, (hash, _))| (path, hash))
+                .collect(),
+        };
 
         if !self.dry {
             if !updates.is_empty() {
@@ -268,7 +288,6 @@ impl SubcommandDelegate for DeployCommand {
                 println!("[ftp-deploy] No files to upload.")
             }
 
-            let files_tracking = FilesTracking { files };
             files_tracking.write(&base_path)?;
         }
 
